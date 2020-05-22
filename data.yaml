@@ -1,0 +1,57 @@
+name: 测试套件
+
+variables:
+  username: kevin
+  password: 123456
+  a: 1
+  b: [a,b,c]
+
+config:
+  baseurl: "https://httpbin.org"
+  request:
+    headers:
+      x-text: hello
+    timeout: 30
+#  variables:
+#    a: 1
+#    b: [a,b,c]
+  args:
+    username: {type: string}
+    password: {type: password}
+  setup_hooks:
+    - print_me: hello
+  teardown_hooks:
+    - print_me: world
+
+keywords:
+  open:
+    name: 打开
+    args: [a,b]
+    skip: True
+    steps:
+      - log $a
+      - log $b
+    return: $b
+
+tests:
+  - name: httpbin get
+    tags: [hello]
+    run_type: random  # parallel/sequence/random
+    steps:
+      - name: 步骤1
+        skip: True
+        times: 3
+        request:
+          url: https://httpbin.org/get
+          method: get
+          params: {a: $a, username: $username, password: $password, user: $SMTP_USER}
+        validate:
+          - eq: [$result.status_code, 200]
+        extract:
+          url: $result.json.url
+      - name: 步骤2
+        request:
+          url: https://httpbin.org/post
+          method: post
+          data: {url: $a}
+      - log $url
