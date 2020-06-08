@@ -5,11 +5,9 @@ import types
 from collections import ChainMap
 import requests
 from operator import eq, gt, lt, ge, le
-from logz import log, logit
+from logz import log
 from parserz import parser
 
-
-from utils import split_and_strip
 
 STEP_KEYS = {'key', 'name', 'skip', 'target', 'args', 'kwargs', 'validate', 'extract', 'times', 'concurrency'}
 COMPARE_FUNCS = dict(
@@ -26,6 +24,11 @@ FUNCTIONS = dict(
     get=requests.get,
     request=requests.request,
 )
+
+
+def split_and_strip(text, seq):
+    return [item.strip() for item in text.split(seq)]
+
 
 class Context(object):
     def __init__(self):
