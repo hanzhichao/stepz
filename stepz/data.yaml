@@ -1,0 +1,33 @@
+config:
+  name: test
+  variables:
+    a: 1
+    b: [a,b,c]
+  args:
+    username: {type: string}
+    password: {type: password}
+
+stages:
+  - name: httpbin get
+    tags: hello
+    run_type: random  # parallel/sequence/random
+    steps:
+      - name: 步骤1
+        action: request
+        # skip: True
+        request:
+          url: https://httpbin.org/get
+          method: get
+          params: {a: $a, username: $username, password: $password}
+        check:
+          - result.status_code == 200
+        extract:
+          url: result.json()['url']
+      - name: 步骤2
+        action: request
+        run_type: parallel
+        times: 3
+        request:
+          url: https://httpbin.org/post
+          method: post
+          data: {url: $url}

@@ -1,271 +1,208 @@
-import re
 import os
-import unittest
-import types
+from string import Template
 from collections import ChainMap
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import random
+
+import yaml
 import requests
-from operator import eq, gt, lt, ge, le
-from logz import log
-from parserz import parser
 
 
-STEP_KEYS = {'key', 'name', 'skip', 'target', 'args', 'kwargs', 'validate', 'extract', 'times', 'concurrency'}
-COMPARE_FUNCS = dict(
-    eq=eq, gt=gt, lt=lt, ge=ge, le=le,
-    len_eq=lambda x, y: len(x) == len(y),
-    str_eq=lambda x, y: str(x) == str(y),
-    type_match=lambda x, y: isinstance(x, y),
-    regex_match=lambda x, y: re.match(y, x)
-)
+# 步骤定义
+CONFIG = 'config'  # 配置关键字  settings
+STAGES = 'stages'
+STEPS = 'steps'  # 步骤关键字  steps/teststeps/testcases
 
+NAME = 'name'  # 名称
+VAIABLES = 'variables'  # 用户自定义变量关键字
+BASEURL = 'baseurl'
+REQUEST = 'request'  # 请求配置,请求数据关键字
+CHECK = 'verify'  # 验证关键字  check/validate/assert
+EXTRACT = 'extract'   # 提取关键字 output/register
+SKIP = 'skip'  # 跳过步骤关键字
+TIMES = 'times'  # 循环步骤关键字  circle
+ACTION = 'action'  # 步骤类型 operation/keywords/function/target
+RUN_TYPE = 'run_type'  # 运行方式
 
-FUNCTIONS = dict(
-    log=log.info,
-    get=requests.get,
-    request=requests.request,
-)
+# 上下文变量
+POLL = '_poll'
+SESSION = '_session'  # 请求会话
 
-
-def split_and_strip(text, seq):
-    return [item.strip() for item in text.split(seq)]
-
-
-class Context(object):
-    def __init__(self):
-        self._variables = ChainMap({}, os.environ)
-        self._functions = FUNCTIONS
-        self._config = {}
-
-    def get(self, key):
-        return self._variables.get(key)
-
-    def update(self, data: dict):
-        if isinstance(data, dict):
-            self._variables.update(data)
-
-    def register_function(self, func_name, func):
-        self._functions[func_name] = func
-
-    def get_function(self, func_name):
-        return self._functions.get(func_name)
-
-    def update_functions(self, functions: dict):
-        assert isinstance(functions, dict), 'functions应为字典类型'
-        self._functions.update(functions)
-
-    def parse(self, data):
-        return parser.parse(data, self._variables)
-
-    def update_config(self, config: dict):
-        assert isinstance(config, dict), 'config应为字典类型'
-        self._config.update(config)
-
-    def __str__(self):
-        return f'varialbes: {self._variables} config: {self._config} functions: {self._functions}'
 
 class Step(object):
-    def __init__(self, data: (str, dict)):
-        self.raw = data
-        self.data = data = self.format_data(data)
+    def __init__(self, step, config, context):
+        self.step = step
+        self.config = config
+        self.context = context
 
-        self.key = data.get('key')
-        self.name = data.get('name')
-        self.skip = data.get('skip')
+        self.name = step.get(NAME)
+        self.skip = step.get(SKIP)
+        self.times = step.get(TIMES, 1)
+        self.run_type = step.get(RUN_TYPE)
+        self.check = step.get(CHECK)
+        self.extract = step.get(EXTRACT)
 
-        self.target = data.get('target')
-        self.args = data.get('args')
-        self.kwargs = data.get('kwargs')
-        if not self.target:
-            self.target, self.args, self.kwargs = self.guess_target_args_kwargs(data)
-
-        self.extract = data.get('extract')
-        self.validate = data.get('validate')
-        self.times = data.get('times')
-        self.concurrency = data.get('concurrency')
-        self.timeout = data.get('timeout')
-
-        self.result = None
-        self.status = None
-
-    def format_data(self, data: dict):
-        """
-        data: name: 步骤2
-              request:
-                url: https://httpbin.org/post
-                method: post
-                data: {url: $url}
-        :return:
-            data: target: request
-                  args: [],
-                  kwargs:
-                    url: ...
-        """
-        assert isinstance(data, (str, dict))
-        if isinstance(data, str):
-            target, *args = data.split()
-            key = None
-            if '=' in target:
-                key, target = split_and_strip(target, '=')
-            kwargs = {item.split('=', 1)[0]: item.split('=', 1)[1] for item in args if '=' in item}
-            args = [item for item in args if '=' not in item]
-            data = dict(key=key, target=target, args=args, kwargs=kwargs)
-        elif not data.get('target'):
-            data['target'], data['args'], data['kwargs'] = self.guess_target_args_kwargs(data)
+    def parse(self, data):
+        data_str = yaml.dump(data, default_flow_style=False)  # 先转为字符串
+        if '$' in data_str:
+            data_str = Template(data_str).safe_substitute(self.context)  # 替换${变量}为varables中的同名变量
+            data = yaml.safe_load(data_str)  # 重新转为字典
         return data
 
-    def guess_target_args_kwargs(self, data: dict):
-        keys = data.keys() - STEP_KEYS
-        if keys:
-            target = keys.pop()
-            attrs = data.get(target)
-            assert isinstance(attrs, (str, list, dict)), f'{target} 参数: {attrs} 必须为list或dict'
-            if isinstance(attrs, str):
-                attrs = [attrs]
-            args, kwargs = (attrs, {}) if isinstance(attrs, list) else ([], attrs)
-            return target, args, kwargs
-        return None, None, None
+    def check(self):
+        # 处理断言
+        if self.check:
+            for line in self.check:
+                result = eval(line, {}, self.context)  # 计算断言表达式，True代表成功，False代表失败
+                print("   处理断言:", line, "结果:", "PASS" if result else "FAIL")
 
-
-    def do_extract(self, context: Context):
-        """处理提取变量"""
-        assert isinstance(self.extract, dict), 'self.extract应为字典类型'
+    def extract(self):
         for key, value in self.extract.items():
-            context.update(dict(key= parser.parse(value, context._variables)))
+            # 计算value表达式，可使用的全局变量为空，可使用的局部变量为RESPONSE(响应对象)
+            result = eval(value, {}, self.context)  # 保存变量结果到上下文中
+            print("   提取变量:", key, value, "结果:", result)
+            self.context[key] = result
 
-    def do_validate(self, context: Context):
-        """处理断言"""
-        assert isinstance(self.validate, list), 'self.validate应为列表类型'
-        for line in self.validate:
-            if 'comparator' in line:
-                comparator = line.get('comparator')
-                check = line.get('check')
-                expect = line.get('expect')
-            else:
-                comparator, value = tuple(line.items())[0]
-                check, expect = value
-            compare_func = COMPARE_FUNCS.get(comparator)
-            field = parser.parse(check, context._variables)
+    def parallel_run(self):
+        # poll = self.context.get(POLL)
 
-            assert compare_func(field, expect), f'表达式: {check} 实际结果: {field} {type(field)} not {comparator} 期望结果: {expect} {type(expect)}'
+        # print(poll)
+        def run_times(i):
+            print('  执行步骤:', self.name, f'第{i+1}轮' if self.times > 1 else '')
+            self.process()
 
-    def do_function(self, context: Context):
-        func = context.get_function(self.target)
-        assert func is not None, f'{context} 中未找到函数: {self.target}'
-        args = parser.parse(self.args, context) if self.args else []
-        kwargs = parser.parse(self.kwargs, context) if self.kwargs else {}
-        result = func(*args, **kwargs)
-        context.update(dict(result=result))
-        if self.key:
-            context.update(dict(key=result))
-        return result
+        for i in range(self.times):
+            t = threading.Thread(target=run_times(i), args=(i,))
+            t.start()
+            t.join()
+        # results = [poll.submit(run_times, i) for i in range(self.times)]
+        # print(results)
+        # return results
 
-    def run(self, context: Context):
-        self.result = self.do_function(context)
-        if self.extract:
-            self.do_extract(context)
-        if self.validate:
-            self.do_validate(context)
-
-class TestSuiteBuilder(object):
-    """一个文件是一个TestSuite"""
-    def __init__(self, data: dict):
-        assert isinstance(data, dict), 'data应为字典类型'
-        self.data = data
-        self.name = data.get('name')
-        self.variables = data.get('variables')
-        self.config = data.get('config')
-        self.keywords = data.get('keywords')
-        self.tests = data.get('tests')
-        self._context = self.build_context()
-
-    def build_context(self):
-        context = Context()
-        context.update_functions(FUNCTIONS)
-        if self.variables:
-            context.update(self.variables)
-        if self.config:
-            context.update_config(self.config)
-        if self.keywords:
-            functions = self.build_keywords()
-            context.update_functions(functions)
-
-        return context
-
-    def build_keywords(self):
-        if self.keywords:
-            functions = {}
-            [functions.update(Keyword(key, data).build_function()) for key, data in self.keywords.items()]
-            return functions
-
-    def build_case(self, index, data) -> types.FunctionType:
-        def test_method(self):
-            if data.get('skip'):
-                raise unittest.SkipTest('Skip=True跳过用例')
-            if data.get('variables'):
-                self.context.update(data.get('variables'))
-            steps = data.get('steps')
-            for step in steps:
-                Step(step).run(self.context)
-
-        test_method.__name__ = f'test_{index + 1}'
-        test_method.__doc__ = data.get('name')
-        test_method.name = data.get('key') or 'test_method'
-        test_method.tags = data.get('tags')
-        test_method.timeout = data.get('timeout')
-        return test_method
-
-    def build_suite(self):
-        class TestStep(unittest.TestCase):
-            @classmethod
-            def setUpClass(cls) -> None:
-                cls.context = self._context
-
-        [setattr(TestStep, f'test_{index + 1}', self.build_case(index, test)) for index, test in enumerate(self.tests)]
-
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestStep)
-        return suite
+    def sequence_run(self):
+        for i in range(self.times):
+            print('  执行步骤:', self.name, f'第{i+1}轮' if self.times > 1 else '')
+            self.process()
 
     def run(self):
-        suite = self.build_suite()
-        runner = unittest.TextTestRunner(verbosity=2)
-        runner.run(suite)
+        if self.skip:
+            print('  跳过步骤:', self.name)
+            return
+        # print('  执行步骤:', self.name)
+        if self.run_type == 'parallel':
+            return self.parallel_run()
+        else:
+            return self.sequence_run()
+
+    def process(self):
+        pass
 
 
-class Keyword(object):
-    """关键字, StepGroup, 可以包含多个步骤, 生成函数"""
-    def __init__(self, key, data: dict):
-        """
-        :param key:  open
-        :param data: name: 打开
-                     args: [a,b]
-                     skip: True
-                     steps:
-                       - log $a
-                       - log $b
-                     :return:
-                       b: $b
-        """
+class Http(Step):
+    def __init__(self, step, config, context):
+        super().__init__(step, config, context)
+        self.baseurl = config.get(BASEURL)
+        context.setdefault(SESSION, requests.session())
+        self.session = context.get(SESSION)
+
+        request = self.config.get(REQUEST)
+        if request:
+            for key, value in request.items():
+                self.session.__setattr__(key, value)
+
+    def set_default_method(self, request):
+        if request.get('data') or request.get('json') or request.get('files'):
+            request.setdefault('method', 'post')
+        else:
+            request.setdefault('method', 'get')
+
+    def pack_url(self, request):
+        if not self.baseurl:
+            return
+        url = request.get('url')
+        if not url.startswith('http'):
+            request['url'] = '/'.join((self.baseurl.rstrip('/'), url.lstrip('/')))
+
+    def send_request(self, request):
+        # 发送请求
+        print('   请求url:', request.get('url'))  # print(' 发送请求:', request)
+        response = self.session.request(**request)  # 字典解包，发送接口
+        print('   状态码:', response.status_code)  # print(' 响应数据:', response.text)
+
+        # 注册上下文变量
+        step_result = dict(
+            request=request,
+            response=response,
+            result=response,
+            status_code=response.status_code,
+            response_text=response.text,
+            response_headers=response.headers,
+            response_time=response.elapsed.seconds
+        )
+        self.context['steps'].append(step_result)  # 保存步骤结果
+        self.context.update(step_result)  # 将最近的响应结果更新到上下文变量中
+
+    def process(self):
+        request = self.step.get(REQUEST)
+        request = self.parse(request)
+        self.set_default_method(request)
+        self.pack_url(request)
+        self.send_request(request)
+
+
+class Stage(object):  # steps
+    def __init__(self, stage, config, context):
+        self.stage = stage
+        self.config = config
+        self.context = context
+
+        self.name = stage.get(NAME)
+        self.run_type = stage.get(RUN_TYPE)
+        self.steps = stage.get(STEPS)
+        self.context['steps'] = []
+
+    def parallel_run(self):
+        self.context.setdefault(POLL, ThreadPoolExecutor(max_workers=len(self.steps)))
+        poll = self.context.get(POLL)
+
+        def run_step(step):
+            print('run step')
+            Http(step, self.config, self.context).run()
+        results = [poll.submit(run_step, step) for step in self.steps]
+        return results
+
+    def sequence_run(self):
+        for step in self.steps:
+            Http(step, self.config, self.context).run()
+
+    def run(self):
+        print(' 执行stage:', self.name, '运行方式:', self.run_type)
+        if self.run_type == 'parallel':
+            return self.parallel_run()
+        elif self.run_type == 'random':
+            random.shuffle(self.steps)
+
+        return self.sequence_run()
+
+
+class Flow(object):
+    def __init__(self, data):
         self.data = data
-        self.key = key
-        self.name = data.get('name')
-        self.skip = data.get('skip')
-        self.args = data.get('args')
-        self.steps = data.get('steps', [])
-        self._return = data.get('return')
-        self.extract = data.get('extract')
-        self.validate = data.get('validate')
+        self.config = data.get(CONFIG, {})
+        self.name = self.config.get(NAME)
+        self.variables = self.config.get(VAIABLES, {})
+        self.context = ChainMap(self.variables, os.environ)
 
-    def build_function(self):
-        def func(*real_args):
-            kwargs = dict(zip(self.args, real_args))
-            locals().update(kwargs)
-            for step in self.steps:
-                step.run(locals(), step)
-            return locals().get(self._return)
-
-        func.__name__ = self.key
-        func.__doc__ = self.name
-        return {self.key: func}
+    def run(self):
+        print('执行流程:', self.name)
+        stages = data.get(STAGES)
+        for stage in stages:
+            Stage(stage, self.config, self.context).run()
 
 
+if __name__ == "__main__":
+    with open('/Users/apple/Documents/Projects/stepz/stepz/data.yaml', encoding='utf-8') as f:
+        data = yaml.safe_load(f)
 
+    Flow(data).run()
