@@ -36,6 +36,9 @@ class Context(object):
         self._functions = FUNCTIONS
         self._config = {}
 
+    def __getitem__(self, key):
+        return self.get(key)
+
     def get(self, key):
         return self._variables.get(key)
 
@@ -62,6 +65,7 @@ class Context(object):
 
     def __str__(self):
         return f'varialbes: {self._variables} config: {self._config} functions: {self._functions}'
+
 
 class Step(object):
     def __init__(self, data: (str, dict)):
@@ -166,6 +170,7 @@ class Step(object):
         if self.validate:
             self.do_validate(context)
 
+
 class TestSuiteBuilder(object):
     """一个文件是一个TestSuite"""
     def __init__(self, data: dict):
@@ -198,12 +203,13 @@ class TestSuiteBuilder(object):
             return functions
 
     def build_case(self, index, data) -> types.FunctionType:
+        assert isinstance(data, dict), 'data必须为dict格式'
         def test_method(self):
             if data.get('skip'):
                 raise unittest.SkipTest('Skip=True跳过用例')
             if data.get('variables'):
                 self.context.update(data.get('variables'))
-            steps = data.get('steps')
+            steps = data.get('steps', [])
             for step in steps:
                 Step(step).run(self.context)
 
@@ -219,7 +225,9 @@ class TestSuiteBuilder(object):
             @classmethod
             def setUpClass(cls) -> None:
                 cls.context = self._context
-
+        if not self.tests:   # todo tests结构验证
+            log.warning('未发现tests')
+            return unittest.TestSuite()
         [setattr(TestStep, f'test_{index + 1}', self.build_case(index, test)) for index, test in enumerate(self.tests)]
 
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestStep)
@@ -228,7 +236,7 @@ class TestSuiteBuilder(object):
     def run(self):
         suite = self.build_suite()
         runner = unittest.TextTestRunner(verbosity=2)
-        runner.run(suite)
+        return runner.run(suite)
 
 
 class Keyword(object):

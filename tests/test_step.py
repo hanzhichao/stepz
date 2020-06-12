@@ -54,10 +54,11 @@ def test_step_run():
 
 
 def test_suite_run():
-    data_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data.yaml')
+    data_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'tests','data.yaml')
     with open(data_file, encoding='utf-8') as f:
         data = yaml.safe_load(f)
-    TestSuiteBuilder(data).run()
+    result = TestSuiteBuilder(data).run()
+    print(result)
 
 
 def test_guess_target_args_kwargs():

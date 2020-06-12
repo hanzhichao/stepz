@@ -1,0 +1,13 @@
+
+tests:
+  - name: 测试用例1
+    steps:
+      - name: 步骤1
+        request:
+          url: https://httpbin.org/get
+          method: get
+          params: {a: $a, username: $username, password: $password, user: $SMTP_USER}
+        validate:
+          - eq: [$result.status_code, 200]
+        extract:
+          url: $result.json.url
